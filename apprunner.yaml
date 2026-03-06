@@ -3,8 +3,8 @@ runtime: python311
 build:
   commands:
     build:
-      - pip3 install -r requirements.txt
+      - pip install -r requirements.txt
 run:
-  command: python3 -m uvicorn main:app --host 0.0.0.0 --port 3001
+  command: uvicorn main:app --host 0.0.0.0 --port 3001 --log-level info
   network:
     port: 3001
