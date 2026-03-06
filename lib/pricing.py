@@ -1,24 +1,10 @@
 """
-Dummy pricing rules for the price estimator.
-Replace these with your real rules when ready.
+Pricing logic for the price estimator.
+Rules are loaded from data/pricing_rules.json (editable via dashboard),
+falling back to hardcoded defaults if the file doesn't exist.
 """
 
-LOGO_SIZE_MULTIPLIERS = {
-    "small": 1.0,
-    "medium": 1.2,
-    "large": 1.5,
-    "full": 2.0,
-}
-
-PER_COLOR_SURCHARGE_CENTS = 50
-
-DEFAULT_BASE_PRICE_CENTS = 1500  # $15.00
-
-QUANTITY_TIERS = {
-    15: 1.0,   # 15-49: no discount
-    50: 0.95,  # 50-99: 5% off
-    100: 0.90,  # 100+: 10% off
-}
+from lib.pricing_rules import load_rules
 
 
 def calculate_estimate(
@@ -35,7 +21,12 @@ def calculate_estimate(
     Returns:
         (total_cents, breakdown_dict)
     """
-    base_price = base_price_cents or DEFAULT_BASE_PRICE_CENTS
+    rules = load_rules()
+
+    base_price = base_price_cents or rules["base_price_cents"]
+    logo_size_multipliers: dict = rules["logo_size_multipliers"]
+    per_color_surcharge: int = rules["per_color_surcharge_cents"]
+    quantity_tiers: dict = rules["quantity_tiers"]
 
     logo_size = "small"
     color_count = 1
@@ -48,10 +39,10 @@ def calculate_estimate(
             logo_size = max(sizes, key=lambda s: size_order.index(s) if s in size_order else -1)
         color_count = max(d.get("color_count", 1) for d in designs)
 
-    logo_multiplier = LOGO_SIZE_MULTIPLIERS.get(logo_size, LOGO_SIZE_MULTIPLIERS["small"])
-    color_surcharge = max(0, color_count - 1) * PER_COLOR_SURCHARGE_CENTS
+    logo_multiplier = logo_size_multipliers.get(logo_size, logo_size_multipliers.get("small", 1.0))
+    color_surcharge = max(0, color_count - 1) * per_color_surcharge
 
-    sorted_tiers = sorted(QUANTITY_TIERS.items(), key=lambda x: -int(x[0]))
+    sorted_tiers = sorted(quantity_tiers.items(), key=lambda x: -int(x[0]))
     quantity_multiplier = 1.0
     for min_qty, mult in sorted_tiers:
         if quantity >= int(min_qty):

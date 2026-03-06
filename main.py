@@ -15,6 +15,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from routes.estimate import router as estimate_router
 from routes.reports import router as reports_router
 from routes.chat import router as chat_router
+from routes.performance_digest import router as digest_router
+from routes.seo_brief import router as seo_brief_router
+from routes.ad_copy import router as ad_copy_router
+from routes.clients import router as clients_router
+from routes.agent_runs import router as agent_runs_router
 
 load_dotenv()
 
@@ -60,6 +65,15 @@ app.include_router(estimate_router)
 app.include_router(reports_router)
 app.include_router(chat_router)
 
+# Agents
+app.include_router(digest_router)
+app.include_router(seo_brief_router)
+app.include_router(ad_copy_router)
+
+# Multi-client & run history
+app.include_router(clients_router)
+app.include_router(agent_runs_router)
+
 
 @app.get("/api/health")
 def health():
@@ -68,4 +82,6 @@ def health():
         "service": "merch7am-price-estimator",
         "openai_configured": bool(os.environ.get("OPENAI_API_KEY")),
         "chat_enabled": bool(os.environ.get("OPENAI_API_KEY")),
+        "agents_enabled": bool(os.environ.get("OPENAI_API_KEY")),
+        "shopify_configured": bool(os.environ.get("SHOPIFY_STOREFRONT_TOKEN")),
     }
