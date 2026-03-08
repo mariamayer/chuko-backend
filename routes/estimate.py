@@ -10,6 +10,8 @@ from lib.estimates import save_estimate, _generate_id
 from lib.email_send import send_estimate_emails
 from lib.vision import analyze_images
 from lib.pricing import calculate_estimate
+from lib.clients import get_client
+from lib.shopify_products import fetch_variant_price_cents
 
 router = APIRouter(prefix="/api", tags=["estimate"])
 
@@ -24,6 +26,10 @@ class EstimateRequest(BaseModel):
     back_design: str | None = None
     no_designs: bool = False
     base_price_cents: int | None = None
+    product_type: str | None = None      # e.g. "tshirt", "hoodie", "cap", "mug"
+    product_variant: str | None = None   # e.g. "white", "black", "color"
+    technique: str | None = None         # e.g. "dtg", "dtf", "serigrafia", "bordado", "grabado"
+    client_id: str = "default"
     currency: str = "USD"
     client_name: str | None = None
     client_email: str | None = None
@@ -66,12 +72,30 @@ async def estimate_price(req: EstimateRequest):
             }
             analysis = {k: v for k, v in analysis.items() if v is not None}
 
+    # ── Resolve base price from Shopify if not explicitly provided ────────────
+    resolved_base_price_cents = req.base_price_cents
+    if not resolved_base_price_cents and (req.variant_id or req.product_id):
+        client = get_client(req.client_id)
+        shopify_price = fetch_variant_price_cents(
+            variant_id=req.variant_id,
+            product_id=req.product_id,
+            store_domain=client.get("shopify_store_domain") if client else None,
+            storefront_token=client.get("shopify_storefront_token") if client else None,
+        )
+        if shopify_price:
+            resolved_base_price_cents = shopify_price
+            print(f"[estimate-price] Using Shopify price: {shopify_price} cents for variant={req.variant_id} product={req.product_id}")
+
     total_cents, breakdown = calculate_estimate(
         analysis=analysis,
         quantity=req.quantity,
         size=req.size,
         color=req.color,
-        base_price_cents=req.base_price_cents,
+        base_price_cents=resolved_base_price_cents,
+        product_type=req.product_type,
+        product_variant=req.product_variant,
+        technique=req.technique,
+        client_id=req.client_id,
     )
 
     estimate_value = round(total_cents / 100, 2)
@@ -79,12 +103,21 @@ async def estimate_price(req: EstimateRequest):
         "estimate": estimate_value,
         "total_cents": total_cents,
         "currency": req.currency,
+        "base_price_source": "shopify" if (resolved_base_price_cents and resolved_base_price_cents != req.base_price_cents) else "rules",
         "breakdown": {
             "base_price_per_unit_cents": breakdown["base_price_per_unit_cents"],
             "logo_size": breakdown["logo_size"],
             "logo_multiplier": breakdown["logo_multiplier"],
+            "product_type": breakdown["product_type"],
+            "product_multiplier": breakdown["product_multiplier"],
+            "product_variant": breakdown["product_variant"],
+            "variant_multiplier": breakdown["variant_multiplier"],
+            "technique": breakdown["technique"],
+            "technique_multiplier": breakdown["technique_multiplier"],
             "color_count": breakdown["color_count"],
             "color_surcharge_cents": breakdown["color_surcharge_cents"],
+            "double_sided": breakdown["double_sided"],
+            "double_sided_surcharge_cents": breakdown["double_sided_surcharge_cents"],
             "quantity_multiplier": breakdown["quantity_multiplier"],
             "unit_price_cents": breakdown["unit_price_cents"],
             "quantity": breakdown["quantity"],
@@ -105,6 +138,7 @@ async def estimate_price(req: EstimateRequest):
 
     save_data = {
         "estimate_id": estimate_id,
+        "client_id": req.client_id,
         "estimate": estimate_value,
         "total_cents": total_cents,
         "currency": req.currency,

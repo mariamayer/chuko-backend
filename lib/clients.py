@@ -113,8 +113,10 @@ def delete_client(client_id: str) -> bool:
 
 
 def sanitize(client: dict) -> dict:
-    """Mask the Shopify token before returning to the API caller."""
+    """Mask sensitive fields before returning to the API caller."""
     c = dict(client)
     if c.get("shopify_storefront_token"):
         c["shopify_storefront_token"] = "••••••••"
+    if c.get("password"):
+        c["password"] = "••••••••"
     return c

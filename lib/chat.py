@@ -6,6 +6,7 @@ import os
 from openai import OpenAI
 
 from lib.shopify_products import fetch_products, products_to_context
+from lib.knowledge import list_entries, entries_to_prompt
 
 SYSTEM_PROMPT = """Eres el asistente de merch7am, una tienda de merchandising personalizado (remeras, gorras, tazas, etc.) con impresión y bordado.
 
@@ -21,7 +22,7 @@ Reglas:
 """
 
 
-def chat(messages: list[dict], include_products: bool = True) -> str:
+def chat(messages: list[dict], include_products: bool = True, client_id: str = "default") -> str:
     """
     Send messages to the chatbot and get a response.
     messages: [{"role": "user"|"assistant"|"system", "content": "..."}]
@@ -31,6 +32,13 @@ def chat(messages: list[dict], include_products: bool = True) -> str:
         return "El asistente no está configurado. Por favor contacta a hola@merch7am.com."
 
     system = SYSTEM_PROMPT
+
+    # Inject Knowledge Base entries if any exist for this client
+    kb_entries = list_entries(client_id)
+    kb_text = entries_to_prompt(kb_entries)
+    if kb_text:
+        system += f"\n\n{kb_text}"
+
     if include_products:
         products = fetch_products(limit=30)
         if products:

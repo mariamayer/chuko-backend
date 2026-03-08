@@ -48,9 +48,10 @@ def _load_estimate(path: Path) -> dict:
 def list_estimates(
     token: str = Query(default=""),
     company: str = Query(default=""),
+    client_id: str = Query(default=""),
     limit: int = Query(default=100, ge=1, le=500),
 ):
-    """Return all estimates sorted by date descending. Optionally filter by company."""
+    """Return all estimates sorted by date descending. Optionally filter by company or client_id."""
     _check_token(token)
     if not ESTIMATES_DIR.exists():
         return {"ok": True, "count": 0, "estimates": []}
@@ -66,17 +67,24 @@ def list_estimates(
             client_company = (data.get("client_company") or "").strip().lower()
             if company.lower() not in client_company:
                 continue
-        # Return a lightweight summary row
+        if client_id:
+            if (data.get("client_id") or "default") != client_id:
+                continue
+        bd = data.get("breakdown", {})
         estimates.append({
             "estimate_id": data.get("estimate_id"),
             "created_at": data.get("created_at"),
+            "client_id": data.get("client_id") or "default",
             "client_name": data.get("client_name") or "",
             "client_email": data.get("client_email") or "",
             "client_company": data.get("client_company") or "",
             "estimate": data.get("estimate"),
-            "currency": data.get("currency", "EUR"),
-            "quantity": data.get("breakdown", {}).get("quantity"),
-            "logo_size": data.get("breakdown", {}).get("logo_size"),
+            "currency": data.get("currency", "USD"),
+            "quantity": bd.get("quantity"),
+            "product_type": bd.get("product_type") or "",
+            "product_variant": bd.get("product_variant") or "",
+            "technique": bd.get("technique") or "",
+            "logo_size": bd.get("logo_size") or "",
         })
         if len(estimates) >= limit:
             break

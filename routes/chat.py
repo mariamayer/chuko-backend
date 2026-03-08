@@ -18,6 +18,7 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     messages: list[ChatMessage] = Field(..., min_length=1, max_length=20)
     include_products: bool = True
+    client_id: str = "default"
 
 
 class ChatResponse(BaseModel):
@@ -29,7 +30,7 @@ async def chat_endpoint(req: ChatRequest):
     """Send messages and get AI reply."""
     try:
         msgs = [{"role": m.role, "content": m.content} for m in req.messages]
-        reply = chat(msgs, include_products=req.include_products)
+        reply = chat(msgs, include_products=req.include_products, client_id=req.client_id)
         return ChatResponse(reply=reply)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
