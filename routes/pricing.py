@@ -18,9 +18,12 @@ def get_rules(client_id: str = "default"):
 
 @router.put("")
 def update_rules(body: dict[str, Any], client_id: str = "default"):
-    """Replace the full pricing rules (lookup table) for a client."""
-    if body.get("mode") != "lookup":
-        raise HTTPException(status_code=400, detail="Body must contain 'mode': 'lookup'")
+    """Replace the personalization pricing rules for a client."""
+    if body.get("mode") not in ("shopify_base", "lookup"):
+        raise HTTPException(status_code=400, detail="Body must contain 'mode': 'shopify_base'")
+    # Validate personalization_prices is a list
+    if "personalization_prices" in body and not isinstance(body["personalization_prices"], list):
+        raise HTTPException(status_code=400, detail="personalization_prices must be a list")
     try:
         save_rules(body, client_id)
     except Exception as e:
