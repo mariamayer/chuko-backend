@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from lib.estimates import save_estimate, _generate_id
+from lib.estimate_images import save_design_images
 from lib.email_send import send_estimate_emails
 from lib.vision import analyze_images
 from lib.pricing import calculate_estimate
@@ -29,6 +30,10 @@ class EstimateRequest(BaseModel):
     product_type: str | None = None      # e.g. "tshirt", "hoodie", "cap", "mug"
     product_variant: str | None = None   # e.g. "white", "black", "color"
     technique: str | None = None         # e.g. "dtg", "dtf", "serigrafia", "bordado", "grabado"
+    # Lookup-mode fields (used when client has mode="lookup" in their pricing rules)
+    product_name: str | None = None      # Spanish product name, e.g. "remera", "gorra", "buzo"
+    logo_placement: str | None = None    # e.g. "1 logo", "2 logos frente y espalda", "diseño 30x40"
+    logo_colors: str | None = None       # e.g. "1 color", "2 colores", "full color", "sin color (grabado)"
     client_id: str = "default"
     currency: str = "USD"
     client_name: str | None = None
@@ -86,7 +91,26 @@ async def estimate_price(req: EstimateRequest):
             resolved_base_price_cents = shopify_price
             print(f"[estimate-price] Using Shopify price: {shopify_price} cents for variant={req.variant_id} product={req.product_id}")
 
-    total_cents, breakdown = calculate_estimate(
+    # ── Derive logo_colors from vision analysis when not explicitly provided ──
+    resolved_logo_colors = req.logo_colors
+    if not resolved_logo_colors and analysis:
+        designs = [d for d in [analysis.get("front"), analysis.get("back")] if d]
+        color_count = max((d.get("color_count", 1) for d in designs), default=1)
+        technique_lower = (req.technique or "").lower()
+        if technique_lower in ("dtf",):
+            resolved_logo_colors = "full color"
+        elif technique_lower in ("grabado", "laser", "grabado laser"):
+            resolved_logo_colors = "sin color (grabado)"
+        elif technique_lower in ("bordado",):
+            resolved_logo_colors = ""
+        elif color_count == 1:
+            resolved_logo_colors = "1 color"
+        elif color_count == 2:
+            resolved_logo_colors = "2 colores"
+        else:
+            resolved_logo_colors = "3 colores"
+
+    total_result, breakdown = calculate_estimate(
         analysis=analysis,
         quantity=req.quantity,
         size=req.size,
@@ -95,36 +119,25 @@ async def estimate_price(req: EstimateRequest):
         product_type=req.product_type,
         product_variant=req.product_variant,
         technique=req.technique,
+        product_name=req.product_name,
+        logo_placement=req.logo_placement,
+        logo_colors=resolved_logo_colors,
         client_id=req.client_id,
     )
 
-    estimate_value = round(total_cents / 100, 2)
+    # ── Build response ────────────────────────────────────────────────────────
+    is_consult = total_result == "consultar"
+    currency_out = breakdown.get("currency", req.currency)
+    estimate_value = total_result if not is_consult else "consultar"
+    total_price = total_result if not is_consult else None
+
     response = {
         "estimate": estimate_value,
-        "total_cents": total_cents,
-        "currency": req.currency,
-        "base_price_source": "shopify" if (resolved_base_price_cents and resolved_base_price_cents != req.base_price_cents) else "rules",
-        "breakdown": {
-            "base_price_per_unit_cents": breakdown["base_price_per_unit_cents"],
-            "logo_size": breakdown["logo_size"],
-            "logo_multiplier": breakdown["logo_multiplier"],
-            "product_type": breakdown["product_type"],
-            "product_multiplier": breakdown["product_multiplier"],
-            "product_variant": breakdown["product_variant"],
-            "variant_multiplier": breakdown["variant_multiplier"],
-            "technique": breakdown["technique"],
-            "technique_multiplier": breakdown["technique_multiplier"],
-            "color_count": breakdown["color_count"],
-            "color_surcharge_cents": breakdown["color_surcharge_cents"],
-            "double_sided": breakdown["double_sided"],
-            "double_sided_surcharge_cents": breakdown["double_sided_surcharge_cents"],
-            "quantity_multiplier": breakdown["quantity_multiplier"],
-            "unit_price_cents": breakdown["unit_price_cents"],
-            "quantity": breakdown["quantity"],
-            "total_cents": breakdown["total_cents"],
-            "size": breakdown["size"],
-            "color": breakdown["color"],
-        },
+        "total": estimate_value,
+        "currency": currency_out,
+        "consultar": is_consult,
+        "base_price_source": "lookup_table",
+        "breakdown": breakdown,
         "analysis": analysis,
         "meta": {
             "product_id": req.product_id,
@@ -136,18 +149,22 @@ async def estimate_price(req: EstimateRequest):
     estimate_id = _generate_id()
     response["estimate_id"] = estimate_id
 
+    design_saved = save_design_images(estimate_id, req.front_design, req.back_design)
+
     save_data = {
         "estimate_id": estimate_id,
         "client_id": req.client_id,
         "estimate": estimate_value,
-        "total_cents": total_cents,
-        "currency": req.currency,
+        "total": total_price,
+        "currency": currency_out,
+        "consultar": is_consult,
         "breakdown": response["breakdown"],
         "analysis": analysis,
         "meta": response["meta"],
         "client_name": req.client_name,
         "client_email": req.client_email,
         "client_company": req.client_company,
+        "design_images": design_saved,
     }
     save_estimate(estimate_id, save_data)
 

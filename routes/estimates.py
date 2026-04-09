@@ -10,10 +10,18 @@ PUT  /api/pricing-rules          → update pricing rules
 import json
 import os
 from pathlib import Path
+from urllib.parse import urlencode
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from lib.estimate_images import (
+    design_images_saved,
+    media_type_for_path,
+    resolve_design_image_path,
+)
+from lib.pricing_lookup import normalize_breakdown_for_dashboard
 from lib.pricing_rules import load_rules, save_rules
 
 router = APIRouter(tags=["estimates"])
@@ -71,6 +79,8 @@ def list_estimates(
             if (data.get("client_id") or "default") != client_id:
                 continue
         bd = data.get("breakdown", {})
+        eid = data.get("estimate_id") or ""
+        imgs = design_images_saved(eid) if eid else {"front": False, "back": False}
         estimates.append({
             "estimate_id": data.get("estimate_id"),
             "created_at": data.get("created_at"),
@@ -85,6 +95,7 @@ def list_estimates(
             "product_variant": bd.get("product_variant") or "",
             "technique": bd.get("technique") or "",
             "logo_size": bd.get("logo_size") or "",
+            "design_images": imgs,
         })
         if len(estimates) >= limit:
             break
@@ -92,10 +103,66 @@ def list_estimates(
     return {"ok": True, "count": len(estimates), "estimates": estimates}
 
 
+# ── Design image file (for dashboard img src) ────────────────────────────────
+
+@router.get("/api/estimates/{estimate_id}/design/{side}")
+def get_estimate_design_image(
+    estimate_id: str,
+    side: str,
+    token: str = Query(default=""),
+):
+    """Return saved front/back design upload (same token as other estimate APIs)."""
+    _check_token(token)
+    if side not in ("front", "back"):
+        raise HTTPException(status_code=404, detail="Invalid side")
+    img_path = resolve_design_image_path(estimate_id, side)
+    if not img_path:
+        raise HTTPException(status_code=404, detail="Image not found")
+    return FileResponse(img_path, media_type=media_type_for_path(img_path))
+
+
 # ── Single estimate detail ────────────────────────────────────────────────────
 
+def _absolute_base_url(request: Request) -> str:
+    """Public origin for image URLs (works behind proxies if Forwarded headers are set)."""
+    return str(request.base_url).rstrip("/")
+
+
+def _design_image_href(eid: str, side: str, token: str, base: str) -> str:
+    path = f"/api/estimates/{eid}/design/{side}"
+    if token:
+        return f"{base}{path}?{urlencode({'token': token})}"
+    return f"{base}{path}"
+
+
+def _enrich_estimate_payload(
+    data: dict,
+    *,
+    token: str = "",
+    public_base: str = "",
+) -> dict:
+    """Attach design image flags, relative paths, and ready-to-use image URLs."""
+    eid = data.get("estimate_id") or ""
+    imgs = design_images_saved(eid) if eid else {"front": False, "back": False}
+    out = dict(data)
+    if isinstance(out.get("breakdown"), dict):
+        out["breakdown"] = normalize_breakdown_for_dashboard(out["breakdown"])
+    out["design_images"] = imgs
+    out["design_image_paths"] = {
+        "front": f"/api/estimates/{eid}/design/front" if imgs["front"] else None,
+        "back": f"/api/estimates/{eid}/design/back" if imgs["back"] else None,
+    }
+    # Ready-to-use URLs for <img src> (absolute when request URL is known). Omitted sides stay null.
+    base = public_base or ""
+    out["images"] = {
+        "front": _design_image_href(eid, "front", token, base) if imgs["front"] else None,
+        "back": _design_image_href(eid, "back", token, base) if imgs["back"] else None,
+    }
+    return out
+
+
 @router.get("/api/estimates/{estimate_id}")
-def get_estimate(estimate_id: str, token: str = Query(default="")):
+def get_estimate(estimate_id: str, request: Request, token: str = Query(default="")):
     """Return full detail for a single estimate."""
     _check_token(token)
     path = ESTIMATES_DIR / f"{estimate_id}.json"
@@ -103,7 +170,15 @@ def get_estimate(estimate_id: str, token: str = Query(default="")):
         raise HTTPException(status_code=404, detail="Estimate not found")
     try:
         data = _load_estimate(path)
-        return {"ok": True, "estimate": data}
+        public_base = _absolute_base_url(request)
+        return {
+            "ok": True,
+            "estimate": _enrich_estimate_payload(
+                data,
+                token=token,
+                public_base=public_base,
+            ),
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -58,7 +58,8 @@ def _build_metrics(estimates: list[dict], weeks: int = 4) -> dict:
         week_key = date.strftime("%Y-W%V")
         w = weekly[week_key]
         w["count"] += 1
-        w["total_value"] += est.get("estimate", 0)
+        raw_val = est.get("total") if est.get("total") is not None else est.get("estimate", 0)
+        w["total_value"] += raw_val if isinstance(raw_val, (int, float)) else 0
         qty = est.get("breakdown", {}).get("quantity", 0)
         if qty:
             w["quantities"].append(qty)
