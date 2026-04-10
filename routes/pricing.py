@@ -19,7 +19,7 @@ def get_rules(client_id: str = "default"):
 @router.put("")
 def update_rules(body: dict[str, Any], client_id: str = "default"):
     """Replace the pricing rules for a client. Accepts multiplier or shopify_base mode."""
-    valid_modes = ("multiplier", "shopify_base", "lookup")
+    valid_modes = ("multiplier", "shopify_base", "lookup", "additive")
     if body.get("mode") not in valid_modes:
         raise HTTPException(status_code=400, detail=f"'mode' must be one of: {', '.join(valid_modes)}")
     if "personalization_prices" in body and not isinstance(body["personalization_prices"], list):
