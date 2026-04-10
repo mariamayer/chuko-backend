@@ -5,4 +5,10 @@ venv/
 .DS_Store
 __pycache__/
 *.pyc
-data/
+# Ignore dynamic runtime data but track seed config files
+data/agent_runs/
+data/estimates/
+data/kb/
+data/clients/
+# DO track pricing rules — needed for deployment
+# data/pricing_rules/ is intentionally NOT ignored
