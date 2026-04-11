@@ -155,11 +155,21 @@ app.include_router(estimates_router)
 
 @app.get("/api/health")
 def health():
+    from lib.pricing_rules import load_rules
+    from pathlib import Path
+    rules_default = load_rules("default")
+    rules_merch   = load_rules("merch7am")
     return {
         "ok": True,
         "service": "merch7am-price-estimator",
+        "version": "2026-04-11-additive",
         "openai_configured": bool(os.environ.get("OPENAI_API_KEY")),
-        "chat_enabled": bool(os.environ.get("OPENAI_API_KEY")),
-        "agents_enabled": bool(os.environ.get("OPENAI_API_KEY")),
         "shopify_configured": bool(os.environ.get("SHOPIFY_STOREFRONT_TOKEN")),
+        "pricing_debug": {
+            "default_rows":   len(rules_default.get("personalization_prices", [])),
+            "merch7am_rows":  len(rules_merch.get("personalization_prices", [])),
+            "default_mode":   rules_default.get("mode"),
+            "default_file_exists": Path("data/pricing_rules/default.json").exists(),
+            "merch7am_file_exists": Path("data/pricing_rules/merch7am.json").exists(),
+        },
     }
