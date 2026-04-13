@@ -135,3 +135,21 @@ def calculate_shopify_base_estimate(
     total = round((base_price_per_unit + personalization) * quantity)
     breakdown["total"] = total
     return total, breakdown
+
+
+# ── Dashboard normalisation helper ───────────────────────────────────────────
+
+def normalize_breakdown_for_dashboard(bd: dict | None) -> dict:
+    """Copy breakdown and add defaults so the admin UI never crashes on missing fields."""
+    out = dict(bd or {})
+    # Additive model doesn't use multipliers; provide stable defaults for any
+    # dashboard code that still expects them.
+    out.setdefault("product_multiplier", 1.0)
+    out.setdefault("variant_multiplier", 1.0)
+    if "base_price_per_unit_cents" not in out:
+        base = out.get("base_price_per_unit")
+        if isinstance(base, (int, float)):
+            out["base_price_per_unit_cents"] = int(base)
+        else:
+            out["base_price_per_unit_cents"] = 0
+    return out
