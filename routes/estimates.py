@@ -7,13 +7,15 @@ GET  /api/pricing-rules          → current pricing rules
 PUT  /api/pricing-rules          → update pricing rules
 """
 
+import base64
 import json
 import os
+import shutil
 from pathlib import Path
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 from lib.estimate_images import (
@@ -80,7 +82,8 @@ def list_estimates(
                 continue
         bd = data.get("breakdown", {})
         eid = data.get("estimate_id") or ""
-        imgs = design_images_saved(eid) if eid else {"front": False, "back": False}
+        # Use JSON-stored flag first (survives container restarts), fall back to disk check
+        imgs = data.get("design_images") or (design_images_saved(eid) if eid else {"front": False, "back": False})
         estimates.append({
             "estimate_id": data.get("estimate_id"),
             "created_at": data.get("created_at"),
@@ -115,10 +118,30 @@ def get_estimate_design_image(
     _check_token(token)
     if side not in ("front", "back"):
         raise HTTPException(status_code=404, detail="Invalid side")
+
+    # 1. Try file on disk (fast path)
     img_path = resolve_design_image_path(estimate_id, side)
-    if not img_path:
-        raise HTTPException(status_code=404, detail="Image not found")
-    return FileResponse(img_path, media_type=media_type_for_path(img_path))
+    if img_path:
+        return FileResponse(img_path, media_type=media_type_for_path(img_path))
+
+    # 2. Fall back to base64 stored in JSON (survives container restarts)
+    json_path = ESTIMATES_DIR / f"{estimate_id}.json"
+    if json_path.exists():
+        try:
+            with open(json_path, encoding="utf-8") as f:
+                data = json.load(f)
+            b64_map = data.get("design_images_b64") or {}
+            raw = b64_map.get(side)
+            if raw and isinstance(raw, str) and raw.startswith("data:image/"):
+                # Parse data URL: data:image/png;base64,<b64data>
+                header, _, payload = raw.partition(",")
+                media_type = header.removeprefix("data:").partition(";")[0]
+                img_bytes = base64.b64decode(payload)
+                return Response(content=img_bytes, media_type=media_type)
+        except Exception:
+            pass
+
+    raise HTTPException(status_code=404, detail="Image not found")
 
 
 # ── Single estimate detail ────────────────────────────────────────────────────
@@ -143,7 +166,8 @@ def _enrich_estimate_payload(
 ) -> dict:
     """Attach design image flags, relative paths, and ready-to-use image URLs."""
     eid = data.get("estimate_id") or ""
-    imgs = design_images_saved(eid) if eid else {"front": False, "back": False}
+    # Use JSON-stored flag first (survives container restarts), fall back to disk check
+    imgs = data.get("design_images") or (design_images_saved(eid) if eid else {"front": False, "back": False})
     out = dict(data)
     if isinstance(out.get("breakdown"), dict):
         out["breakdown"] = normalize_breakdown_for_dashboard(out["breakdown"])
@@ -181,6 +205,22 @@ def get_estimate(estimate_id: str, request: Request, token: str = Query(default=
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Delete estimate ──────────────────────────────────────────────────────────
+
+@router.delete("/api/estimates/{estimate_id}")
+def delete_estimate(estimate_id: str, token: str = Query(default="")):
+    """Delete a single estimate and its associated design images."""
+    _check_token(token)
+    path = ESTIMATES_DIR / f"{estimate_id}.json"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Estimate not found")
+    path.unlink()
+    img_dir = ESTIMATES_DIR / estimate_id
+    if img_dir.is_dir():
+        shutil.rmtree(img_dir)
+    return {"ok": True, "deleted": estimate_id}
 
 
 # ── Pricing rules ─────────────────────────────────────────────────────────────

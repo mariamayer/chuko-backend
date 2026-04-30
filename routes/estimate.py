@@ -163,6 +163,11 @@ async def estimate_price(req: EstimateRequest):
         "client_email": req.client_email,
         "client_company": req.client_company,
         "design_images": design_saved,
+        # Store raw base64 as fallback so images survive container restarts
+        "design_images_b64": {
+            "front": req.front_design if design_saved.get("front") else None,
+            "back": req.back_design if design_saved.get("back") else None,
+        },
     }
     save_estimate(estimate_id, save_data)
 
