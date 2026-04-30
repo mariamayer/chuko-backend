@@ -113,8 +113,6 @@ async def estimate_price(req: EstimateRequest):
     total_result, breakdown = calculate_estimate(
         analysis=analysis,
         quantity=req.quantity,
-        size=req.size,
-        color=req.color,
         base_price_cents=resolved_base_price_cents,
         product_type=req.product_type,
         product_variant=req.product_variant,

@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 
 from routes.auth import router as auth_router
 from routes.estimate import router as estimate_router
@@ -110,30 +111,53 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS: permissive for dev, configurable for prod
-_cors = os.environ.get("CORS_ORIGIN", "*").strip()
-if _cors == "*":
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-else:
-    origins = [o.strip() for o in _cors.split(",") if o.strip()]
-    # Regex: Shopify, localhost, merch7am.com
-    _regex = (
-        r"^https://[a-zA-Z0-9-]+\.myshopify\.com$"
-        r"|^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
-        r"|^https://(www\.)?merch7am\.com$"
-    )
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=origins,
-        allow_origin_regex=_regex,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+# CORS: storefront JS calls this API from https://merch7am.com.
+# Shopify's shop_events_listener may wrap fetch with credentials; browsers then REJECT
+# Access-Control-Allow-Origin: * (requires a concrete origin + Allow-Credentials).
+# So we never use allow_origins=["*"] here — always explicit domains + myshopify regex.
+_STORE_ORIGINS = (
+    "https://merch7am.com",
+    "https://www.merch7am.com",
+    "https://merch7am.myshopify.com",
+)
+_DEV_ORIGINS = (
+    "http://127.0.0.1:9292",
+    "http://localhost:9292",
+    "http://127.0.0.1:3000",
+    "http://localhost:3000",
+)
+_ORIGIN_REGEX = (
+    r"^https://[a-zA-Z0-9-]+\.myshopify\.com$"
+    r"|^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
+    r"|^https://(www\.)?merch7am\.com$"
+)
+
+
+def _cors_allowed_origins() -> list[str]:
+    seen = set()
+    out = []
+    for o in (*_STORE_ORIGINS, *_DEV_ORIGINS):
+        if o not in seen:
+            seen.add(o)
+            out.append(o)
+    raw = (os.environ.get("CORS_ORIGIN") or "").strip()
+    if raw and raw != "*":
+        for part in raw.split(","):
+            p = part.strip().rstrip("/")
+            if p and p not in seen:
+                seen.add(p)
+                out.append(p)
+    return out
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_allowed_origins(),
+    allow_origin_regex=_ORIGIN_REGEX,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 app.include_router(auth_router)
 app.include_router(estimate_router)
@@ -151,6 +175,22 @@ app.include_router(agent_runs_router)
 app.include_router(knowledge_router)
 app.include_router(pricing_router)
 app.include_router(estimates_router)
+
+
+@app.get("/")
+def root():
+    """Avoid 404 noise when opening http://localhost:3001/ in a browser."""
+    return {
+        "service": "merch7am-price-estimator",
+        "openapi": "/docs",
+        "health": "/api/health",
+        "estimate": "POST /api/estimate-price",
+    }
+
+
+@app.get("/favicon.ico")
+def favicon_noop():
+    return Response(status_code=204)
 
 
 @app.get("/api/health")

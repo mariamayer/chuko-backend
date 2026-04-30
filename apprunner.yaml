@@ -12,8 +12,9 @@ run:
   env:
     - name: PORT
       value: "3001"
+    # Optional extra origins only; base list is baked into main.py (avoids ACAO:* + credentialed fetch).
     - name: CORS_ORIGIN
-      value: "*"
+      value: "https://merch7am.com,https://www.merch7am.com,https://merch7am.myshopify.com"
     - name: CHAT_MODEL
       value: gpt-4o-mini
     - name: SHOPIFY_STORE_DOMAIN
