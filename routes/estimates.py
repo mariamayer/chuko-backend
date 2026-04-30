@@ -1,10 +1,14 @@
 """
 Estimates API — list saved estimates and manage pricing rules.
 
-GET  /api/estimates              → list all estimates (sorted newest first)
-GET  /api/estimates/{id}         → single estimate detail
-GET  /api/pricing-rules          → current pricing rules
-PUT  /api/pricing-rules          → update pricing rules
+GET    /api/estimates              → list all estimates (sorted newest first)
+GET    /api/estimates/{id}         → single estimate detail
+GET    /api/estimates/{id}/design/{side} → design image (file or presigned S3 redirect)
+DELETE /api/estimates/{id}         → delete estimate + images
+GET    /api/pricing-rules          → current pricing rules
+PUT    /api/pricing-rules          → update pricing rules
+
+Storage: S3 when S3_BUCKET env var is set; local filesystem otherwise.
 """
 
 import base64
@@ -15,13 +19,15 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from pydantic import BaseModel
 
+from lib import s3_storage
 from lib.estimate_images import (
     design_images_saved,
     media_type_for_path,
     resolve_design_image_path,
+    resolve_design_image_s3_key,
 )
 from lib.pricing_lookup import normalize_breakdown_for_dashboard
 from lib.pricing_rules import load_rules, save_rules
@@ -37,10 +43,8 @@ def _check_token(token: str) -> None:
         raise HTTPException(status_code=403, detail="Invalid or missing token")
 
 
-def _load_estimate(path: Path) -> dict:
-    with open(path, encoding="utf-8") as f:
-        data = json.load(f)
-    # Derive date from estimate_id (EST-YYYYMMDD-XXXX) as ISO string
+def _add_created_at(data: dict) -> dict:
+    """Derive created_at from estimate_id (EST-YYYYMMDD-XXXX)."""
     eid = data.get("estimate_id", "")
     created_at = ""
     if eid.startswith("EST-") and len(eid) >= 12:
@@ -52,6 +56,53 @@ def _load_estimate(path: Path) -> dict:
     return data
 
 
+def _load_estimate_local(path: Path) -> dict:
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    return _add_created_at(data)
+
+
+def _load_estimate_s3(estimate_id: str) -> dict | None:
+    key = s3_storage.estimate_json_key(estimate_id)
+    data = s3_storage.get_json(key)
+    if data is None:
+        return None
+    return _add_created_at(data)
+
+
+def _load_estimate(estimate_id: str) -> dict | None:
+    """Load estimate from S3 or local filesystem."""
+    if s3_storage.is_enabled():
+        return _load_estimate_s3(estimate_id)
+    path = ESTIMATES_DIR / f"{estimate_id}.json"
+    if not path.exists():
+        return None
+    return _load_estimate_local(path)
+
+
+def _estimate_summary(data: dict) -> dict:
+    bd = data.get("breakdown", {})
+    eid = data.get("estimate_id") or ""
+    # Use JSON-stored flag (persists even after container restarts or S3 re-reads)
+    imgs = data.get("design_images") or {"front": False, "back": False}
+    return {
+        "estimate_id": data.get("estimate_id"),
+        "created_at": data.get("created_at"),
+        "client_id": data.get("client_id") or "default",
+        "client_name": data.get("client_name") or "",
+        "client_email": data.get("client_email") or "",
+        "client_company": data.get("client_company") or "",
+        "estimate": data.get("estimate"),
+        "currency": data.get("currency", "USD"),
+        "quantity": bd.get("quantity"),
+        "product_type": bd.get("product_type") or "",
+        "product_variant": bd.get("product_variant") or "",
+        "technique": bd.get("technique") or "",
+        "logo_size": bd.get("logo_size") or "",
+        "design_images": imgs,
+    }
+
+
 # ── List estimates ────────────────────────────────────────────────────────────
 
 @router.get("/api/estimates")
@@ -61,52 +112,58 @@ def list_estimates(
     client_id: str = Query(default=""),
     limit: int = Query(default=100, ge=1, le=500),
 ):
-    """Return all estimates sorted by date descending. Optionally filter by company or client_id."""
+    """Return all estimates sorted by date descending."""
     _check_token(token)
-    if not ESTIMATES_DIR.exists():
-        return {"ok": True, "count": 0, "estimates": []}
 
-    paths = sorted(ESTIMATES_DIR.glob("EST-*.json"), reverse=True)
     estimates = []
-    for path in paths:
-        try:
-            data = _load_estimate(path)
-        except Exception:
-            continue
-        if company:
-            client_company = (data.get("client_company") or "").strip().lower()
-            if company.lower() not in client_company:
+
+    if s3_storage.is_enabled():
+        # List all JSON keys from S3 (already sorted newest-first by key name)
+        prefix = s3_storage.estimate_list_prefix()
+        keys = s3_storage.list_keys(prefix)
+        json_keys = [k for k in keys if k.endswith(".json")]
+        for key in json_keys:
+            try:
+                data = s3_storage.get_json(key)
+                if not data:
+                    continue
+                _add_created_at(data)
+            except Exception:
                 continue
-        if client_id:
-            if (data.get("client_id") or "default") != client_id:
+            if company:
+                cc = (data.get("client_company") or "").strip().lower()
+                if company.lower() not in cc:
+                    continue
+            if client_id:
+                if (data.get("client_id") or "default") != client_id:
+                    continue
+            estimates.append(_estimate_summary(data))
+            if len(estimates) >= limit:
+                break
+    else:
+        if not ESTIMATES_DIR.exists():
+            return {"ok": True, "count": 0, "estimates": []}
+        paths = sorted(ESTIMATES_DIR.glob("EST-*.json"), reverse=True)
+        for path in paths:
+            try:
+                data = _load_estimate_local(path)
+            except Exception:
                 continue
-        bd = data.get("breakdown", {})
-        eid = data.get("estimate_id") or ""
-        # Use JSON-stored flag first (survives container restarts), fall back to disk check
-        imgs = data.get("design_images") or (design_images_saved(eid) if eid else {"front": False, "back": False})
-        estimates.append({
-            "estimate_id": data.get("estimate_id"),
-            "created_at": data.get("created_at"),
-            "client_id": data.get("client_id") or "default",
-            "client_name": data.get("client_name") or "",
-            "client_email": data.get("client_email") or "",
-            "client_company": data.get("client_company") or "",
-            "estimate": data.get("estimate"),
-            "currency": data.get("currency", "USD"),
-            "quantity": bd.get("quantity"),
-            "product_type": bd.get("product_type") or "",
-            "product_variant": bd.get("product_variant") or "",
-            "technique": bd.get("technique") or "",
-            "logo_size": bd.get("logo_size") or "",
-            "design_images": imgs,
-        })
-        if len(estimates) >= limit:
-            break
+            if company:
+                cc = (data.get("client_company") or "").strip().lower()
+                if company.lower() not in cc:
+                    continue
+            if client_id:
+                if (data.get("client_id") or "default") != client_id:
+                    continue
+            estimates.append(_estimate_summary(data))
+            if len(estimates) >= limit:
+                break
 
     return {"ok": True, "count": len(estimates), "estimates": estimates}
 
 
-# ── Design image file (for dashboard img src) ────────────────────────────────
+# ── Design image ──────────────────────────────────────────────────────────────
 
 @router.get("/api/estimates/{estimate_id}/design/{side}")
 def get_estimate_design_image(
@@ -114,32 +171,34 @@ def get_estimate_design_image(
     side: str,
     token: str = Query(default=""),
 ):
-    """Return saved front/back design upload (same token as other estimate APIs)."""
+    """Return the front/back design image."""
     _check_token(token)
     if side not in ("front", "back"):
         raise HTTPException(status_code=404, detail="Invalid side")
 
-    # 1. Try file on disk (fast path)
+    # ── S3 path: redirect to presigned URL ───────────────────────────────────
+    if s3_storage.is_enabled():
+        key = resolve_design_image_s3_key(estimate_id, side)
+        if key:
+            url = s3_storage.presigned_url(key, expires_in=3600)
+            return RedirectResponse(url=url, status_code=302)
+        # Fall through to JSON b64 fallback below
+
+    # ── Local filesystem path ────────────────────────────────────────────────
     img_path = resolve_design_image_path(estimate_id, side)
     if img_path:
         return FileResponse(img_path, media_type=media_type_for_path(img_path))
 
-    # 2. Fall back to base64 stored in JSON (survives container restarts)
-    json_path = ESTIMATES_DIR / f"{estimate_id}.json"
-    if json_path.exists():
-        try:
-            with open(json_path, encoding="utf-8") as f:
-                data = json.load(f)
-            b64_map = data.get("design_images_b64") or {}
-            raw = b64_map.get(side)
-            if raw and isinstance(raw, str) and raw.startswith("data:image/"):
-                # Parse data URL: data:image/png;base64,<b64data>
-                header, _, payload = raw.partition(",")
-                media_type = header.removeprefix("data:").partition(";")[0]
-                img_bytes = base64.b64decode(payload)
-                return Response(content=img_bytes, media_type=media_type)
-        except Exception:
-            pass
+    # ── JSON-embedded base64 fallback (old estimates or local dev) ────────────
+    data = _load_estimate(estimate_id)
+    if data:
+        b64_map = data.get("design_images_b64") or {}
+        raw = b64_map.get(side)
+        if raw and isinstance(raw, str) and raw.startswith("data:image/"):
+            header, _, payload = raw.partition(",")
+            media_type = header.removeprefix("data:").partition(";")[0]
+            img_bytes = base64.b64decode(payload)
+            return Response(content=img_bytes, media_type=media_type)
 
     raise HTTPException(status_code=404, detail="Image not found")
 
@@ -147,7 +206,6 @@ def get_estimate_design_image(
 # ── Single estimate detail ────────────────────────────────────────────────────
 
 def _absolute_base_url(request: Request) -> str:
-    """Public origin for image URLs (works behind proxies if Forwarded headers are set)."""
     return str(request.base_url).rstrip("/")
 
 
@@ -158,30 +216,25 @@ def _design_image_href(eid: str, side: str, token: str, base: str) -> str:
     return f"{base}{path}"
 
 
-def _enrich_estimate_payload(
-    data: dict,
-    *,
-    token: str = "",
-    public_base: str = "",
-) -> dict:
-    """Attach design image flags, relative paths, and ready-to-use image URLs."""
+def _enrich_estimate_payload(data: dict, *, token: str = "", public_base: str = "") -> dict:
+    """Attach design image flags, paths, and ready-to-use image URLs."""
     eid = data.get("estimate_id") or ""
-    # Use JSON-stored flag first (survives container restarts), fall back to disk check
-    imgs = data.get("design_images") or (design_images_saved(eid) if eid else {"front": False, "back": False})
+    imgs = data.get("design_images") or {"front": False, "back": False}
     out = dict(data)
     if isinstance(out.get("breakdown"), dict):
         out["breakdown"] = normalize_breakdown_for_dashboard(out["breakdown"])
     out["design_images"] = imgs
     out["design_image_paths"] = {
-        "front": f"/api/estimates/{eid}/design/front" if imgs["front"] else None,
-        "back": f"/api/estimates/{eid}/design/back" if imgs["back"] else None,
+        "front": f"/api/estimates/{eid}/design/front" if imgs.get("front") else None,
+        "back": f"/api/estimates/{eid}/design/back" if imgs.get("back") else None,
     }
-    # Ready-to-use URLs for <img src> (absolute when request URL is known). Omitted sides stay null.
     base = public_base or ""
     out["images"] = {
-        "front": _design_image_href(eid, "front", token, base) if imgs["front"] else None,
-        "back": _design_image_href(eid, "back", token, base) if imgs["back"] else None,
+        "front": _design_image_href(eid, "front", token, base) if imgs.get("front") else None,
+        "back": _design_image_href(eid, "back", token, base) if imgs.get("back") else None,
     }
+    # Strip large b64 blobs from the detail response (not needed by the client)
+    out.pop("design_images_b64", None)
     return out
 
 
@@ -189,37 +242,41 @@ def _enrich_estimate_payload(
 def get_estimate(estimate_id: str, request: Request, token: str = Query(default="")):
     """Return full detail for a single estimate."""
     _check_token(token)
-    path = ESTIMATES_DIR / f"{estimate_id}.json"
-    if not path.exists():
+    data = _load_estimate(estimate_id)
+    if data is None:
         raise HTTPException(status_code=404, detail="Estimate not found")
     try:
-        data = _load_estimate(path)
         public_base = _absolute_base_url(request)
         return {
             "ok": True,
-            "estimate": _enrich_estimate_payload(
-                data,
-                token=token,
-                public_base=public_base,
-            ),
+            "estimate": _enrich_estimate_payload(data, token=token, public_base=public_base),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ── Delete estimate ──────────────────────────────────────────────────────────
+# ── Delete estimate ───────────────────────────────────────────────────────────
 
 @router.delete("/api/estimates/{estimate_id}")
 def delete_estimate(estimate_id: str, token: str = Query(default="")):
     """Delete a single estimate and its associated design images."""
     _check_token(token)
-    path = ESTIMATES_DIR / f"{estimate_id}.json"
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="Estimate not found")
-    path.unlink()
-    img_dir = ESTIMATES_DIR / estimate_id
-    if img_dir.is_dir():
-        shutil.rmtree(img_dir)
+
+    if s3_storage.is_enabled():
+        key = s3_storage.estimate_json_key(estimate_id)
+        if not s3_storage.object_exists(key):
+            raise HTTPException(status_code=404, detail="Estimate not found")
+        s3_storage.delete_object(key)
+        s3_storage.delete_prefix(s3_storage.estimate_image_prefix(estimate_id))
+    else:
+        path = ESTIMATES_DIR / f"{estimate_id}.json"
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="Estimate not found")
+        path.unlink()
+        img_dir = ESTIMATES_DIR / estimate_id
+        if img_dir.is_dir():
+            shutil.rmtree(img_dir)
+
     return {"ok": True, "deleted": estimate_id}
 
 
