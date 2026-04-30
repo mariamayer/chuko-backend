@@ -15,6 +15,7 @@ from fastapi.responses import Response
 
 from routes.auth import router as auth_router
 from routes.estimate import router as estimate_router
+from routes.corp_brief import router as corp_brief_router
 from routes.reports import router as reports_router
 from routes.chat import router as chat_router
 from routes.performance_digest import router as digest_router
@@ -161,6 +162,7 @@ app.add_middleware(
 
 app.include_router(auth_router)
 app.include_router(estimate_router)
+app.include_router(corp_brief_router)
 app.include_router(reports_router)
 app.include_router(chat_router)
 

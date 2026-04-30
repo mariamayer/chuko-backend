@@ -125,3 +125,74 @@ def send_estimate_emails(estimate_id: str, data: dict) -> tuple[bool, str]:
         return True, "Emails sent"
     except Exception as e:
         return False, str(e)
+
+
+def _corp_brief_text_body(data: dict) -> str:
+    lines = [
+        "Brief corporativo — formulario web",
+        "",
+        "--- Contacto ---",
+        f"Nombre: {data.get('nombre', '-')}",
+        f"Apellido: {data.get('apellido', '-')}",
+        f"Empresa: {data.get('empresa', '-')}",
+        f"Puesto: {data.get('puesto', '-')}",
+        f"Mail: {data.get('email', '-')}",
+        f"WhatsApp / tel: {data.get('tel') or '—'}",
+        f"Preferencia de contacto: {data.get('preferencia_contacto') or '—'}",
+        "",
+        "--- Proyecto ---",
+        f"Tipo: {data.get('tipo') or '—'}",
+        f"Logo / diseño: {data.get('logo') or '—'}",
+    ]
+    como = data.get("como")
+    if como:
+        lines.extend(["", f"Cómo nos conocieron: {como}"])
+    cantidad = data.get("cantidad")
+    if cantidad:
+        lines.append(f"Cantidad tentativa: {cantidad}")
+    fecha = data.get("fecha")
+    if fecha:
+        lines.append(f"Fecha esperada entrega / evento: {fecha}")
+
+    ctx = (data.get("contexto") or "").strip()
+    lines.extend(["", "--- Detalle ---", ctx if ctx else "(sin texto adicional)", ""])
+    return "\n".join(lines)
+
+
+def send_corp_brief_email(data: dict) -> tuple[bool, str]:
+    """
+    Notify admin via Resend when someone submits the corporate brief modal.
+
+    Uses RESEND_API_KEY, ADMIN_EMAIL / BRIEF_TO_EMAIL (optional override),
+    RESEND_FROM_EMAIL.
+    Returns (success, message).
+    """
+    api_key = os.environ.get("RESEND_API_KEY")
+    admin_email = os.environ.get("BRIEF_TO_EMAIL") or os.environ.get("ADMIN_EMAIL")
+    from_email = os.environ.get("RESEND_FROM_EMAIL", "onboarding@resend.dev")
+
+    if not api_key or not admin_email:
+        return False, "Email not configured (RESEND_API_KEY and ADMIN_EMAIL or BRIEF_TO_EMAIL)"
+
+    empresa = data.get("empresa") or "—"
+    nombre = data.get("nombre") or ""
+
+    try:
+        import httpx
+
+        r = httpx.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "from": from_email,
+                "to": [admin_email],
+                "subject": f"[merch7am] Brief — {nombre} — {empresa}",
+                "text": _corp_brief_text_body(data),
+            },
+            timeout=12,
+        )
+        if r.status_code >= 400:
+            return False, f"Resend failed: {r.text}"
+        return True, "Brief email sent"
+    except Exception as e:
+        return False, str(e)

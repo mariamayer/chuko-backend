@@ -65,6 +65,14 @@ When `client_name` and/or `client_email` are sent:
    - Admin receives full details (price, product, quantity, logo analysis, client info)
    - Client receives a summary with their quote ID
 
+### `POST /api/corp-brief`
+
+Recibe los datos del **brief corporativo** (modal en la tienda) y envía un mail de texto por **Resend** al equipo.
+
+**Variables:** `RESEND_API_KEY`, `RESEND_FROM_EMAIL`, y `ADMIN_EMAIL` o **`BRIEF_TO_EMAIL`** (destino del brief).
+
+Opcional: **`BRIEF_FORM_SECRET`** — si está definido, el cuerpo JSON debe incluir `form_token` con el mismo valor (el tema puede guardarlo en Ajustes › Formulario brief corporativo).
+
 ## Dummy Pricing Rules
 
 Currently in `lib/pricing.py`:

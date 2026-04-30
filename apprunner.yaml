@@ -22,9 +22,9 @@ run:
     - name: SHOPIFY_STORE_URL
       value: https://merch7am.com
     - name: RESEND_FROM_EMAIL
-      value: onboarding@resend.dev
+      value: info@merch7am.com
     - name: ADMIN_EMAIL
-      value: admin@merch7am.com
+      value: info@merch7am.com
     - name: REPORT_EMAIL
       value: reportes@merch7am.com
     - name: DIGEST_EMAIL
@@ -33,3 +33,6 @@ run:
       value: ""
     - name: S3_PREFIX
       value: "estimates/"
+  secrets:
+    - name: RESEND_API_KEY
+      value-from: "arn:aws:secretsmanager:us-east-1:383021010759:secret:merch7am/resend-api-key-hpG0ov"
