@@ -30,7 +30,7 @@ run:
     - name: DIGEST_EMAIL
       value: digest@merch7am.com
     - name: S3_BUCKET
-      value: ""
+      value: "merch7am-estimates"
     - name: S3_PREFIX
       value: "estimates/"
   secrets:
