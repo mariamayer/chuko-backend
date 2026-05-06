@@ -146,10 +146,31 @@ def normalize_breakdown_for_dashboard(bd: dict | None) -> dict:
     # dashboard code that still expects them.
     out.setdefault("product_multiplier", 1.0)
     out.setdefault("variant_multiplier", 1.0)
+
+    # Promote product/technique from nested matched_row/lookup for older estimates
+    # that were saved before these fields existed at the top level.
+    if not out.get("product_type"):
+        mr = out.get("matched_row") or out.get("lookup") or {}
+        val = mr.get("product") or ""
+        if val:
+            out["product_type"] = val
+    if not out.get("technique"):
+        mr = out.get("matched_row") or out.get("lookup") or {}
+        val = mr.get("technique") or ""
+        if val:
+            out["technique"] = val
+    if not out.get("product_variant"):
+        mr = out.get("matched_row") or out.get("lookup") or {}
+        val = mr.get("variant") or ""
+        if val:
+            out["product_variant"] = val
+
+    # Only set base_price_per_unit_cents for the legacy multiplier pipeline
+    # (where base > 0). A zero base means it's the additive/consultar model —
+    # setting cents=0 would wrongly trigger hasLegacyPricedBreakdown in the UI.
     if "base_price_per_unit_cents" not in out:
         base = out.get("base_price_per_unit")
-        if isinstance(base, (int, float)):
+        if isinstance(base, (int, float)) and base > 0:
             out["base_price_per_unit_cents"] = int(base)
-        else:
-            out["base_price_per_unit_cents"] = 0
+
     return out

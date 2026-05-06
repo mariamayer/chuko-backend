@@ -259,12 +259,19 @@ def calculate_estimate(
     total = round(unit_price * quantity)
 
     breakdown = {
-        "base_price_per_unit":         round(base_per_unit, 2),
-        "personalization_per_unit":    pers_per_unit,
-        "unit_price":                  round(unit_price, 2),
-        "quantity":                    quantity,
-        "total":                       total,
-        "currency":                    currency,
+        # Top-level fields for dashboard display
+        "product_type":               product_lookup,
+        "product_variant":            variant_lookup,
+        "technique":                  tech_key,
+        "logo_placement":             placement_lookup,
+        "colors":                     color_key,
+        # Pricing
+        "base_price_per_unit":        round(base_per_unit, 2),
+        "personalization_per_unit":   pers_per_unit,
+        "unit_price":                 round(unit_price, 2),
+        "quantity":                   quantity,
+        "total":                      total,
+        "currency":                   currency,
         "matched_row": {
             "product":   row.get("product"),
             "technique": row.get("technique"),

@@ -67,13 +67,17 @@ def save_design_images(
             continue
 
         if s3_storage.is_enabled():
-            key = s3_storage.estimate_image_key(estimate_id, side, ext)
-            s3_storage.put_bytes(key, data, _CONTENT_TYPES.get(ext, "image/jpeg"))
-        else:
-            sub = _subdir(estimate_id)
-            sub.mkdir(parents=True, exist_ok=True)
-            (sub / f"{side}.{ext}").write_bytes(data)
+            try:
+                key = s3_storage.estimate_image_key(estimate_id, side, ext)
+                s3_storage.put_bytes(key, data, _CONTENT_TYPES.get(ext, "image/jpeg"))
+                result[side] = True
+                continue
+            except Exception as e:
+                print(f"[estimate_images] S3 write failed for {side}, falling back to local: {e}")
 
+        sub = _subdir(estimate_id)
+        sub.mkdir(parents=True, exist_ok=True)
+        (sub / f"{side}.{ext}").write_bytes(data)
         result[side] = True
 
     return result
