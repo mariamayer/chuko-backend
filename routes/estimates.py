@@ -71,9 +71,15 @@ def _load_estimate_s3(estimate_id: str) -> dict | None:
 
 
 def _load_estimate(estimate_id: str) -> dict | None:
-    """Load estimate from S3 or local filesystem."""
+    """Load estimate from S3 (primary) or local filesystem (fallback)."""
     if s3_storage.is_enabled():
-        return _load_estimate_s3(estimate_id)
+        try:
+            data = _load_estimate_s3(estimate_id)
+            if data is not None:
+                return data
+        except Exception as e:
+            print(f"[estimates] S3 load failed for {estimate_id}, trying local: {e}")
+    # Fall back to local filesystem (catches S3-fallback saves)
     path = ESTIMATES_DIR / f"{estimate_id}.json"
     if not path.exists():
         return None
@@ -81,9 +87,7 @@ def _load_estimate(estimate_id: str) -> dict | None:
 
 
 def _estimate_summary(data: dict) -> dict:
-    bd = data.get("breakdown", {})
-    eid = data.get("estimate_id") or ""
-    # Use JSON-stored flag (persists even after container restarts or S3 re-reads)
+    bd = normalize_breakdown_for_dashboard(data.get("breakdown") or {})
     imgs = data.get("design_images") or {"front": False, "back": False}
     return {
         "estimate_id": data.get("estimate_id"),
@@ -276,20 +280,30 @@ def delete_estimate(estimate_id: str, token: str = Query(default="")):
     """Delete a single estimate and its associated design images."""
     _check_token(token)
 
+    deleted = False
+
+    # Try S3 first
     if s3_storage.is_enabled():
-        key = s3_storage.estimate_json_key(estimate_id)
-        if not s3_storage.object_exists(key):
-            raise HTTPException(status_code=404, detail="Estimate not found")
-        s3_storage.delete_object(key)
-        s3_storage.delete_prefix(s3_storage.estimate_image_prefix(estimate_id))
-    else:
-        path = ESTIMATES_DIR / f"{estimate_id}.json"
-        if not path.exists():
-            raise HTTPException(status_code=404, detail="Estimate not found")
-        path.unlink()
+        try:
+            key = s3_storage.estimate_json_key(estimate_id)
+            if s3_storage.object_exists(key):
+                s3_storage.delete_object(key)
+                s3_storage.delete_prefix(s3_storage.estimate_image_prefix(estimate_id))
+                deleted = True
+        except Exception as e:
+            print(f"[estimates] S3 delete failed for {estimate_id}, trying local: {e}")
+
+    # Also try local filesystem (catches S3-fallback saves)
+    local_path = ESTIMATES_DIR / f"{estimate_id}.json"
+    if local_path.exists():
+        local_path.unlink()
         img_dir = ESTIMATES_DIR / estimate_id
         if img_dir.is_dir():
             shutil.rmtree(img_dir)
+        deleted = True
+
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Estimate not found")
 
     return {"ok": True, "deleted": estimate_id}
 

@@ -147,18 +147,28 @@ def normalize_breakdown_for_dashboard(bd: dict | None) -> dict:
     out.setdefault("product_multiplier", 1.0)
     out.setdefault("variant_multiplier", 1.0)
 
-    # Promote product/technique from nested matched_row/lookup for older estimates
-    # that were saved before these fields existed at the top level.
+    # Promote product/technique from wherever they're stored.
+    # Try: top-level "product" → matched_row → lookup → parse "row_matched" string.
     if not out.get("product_type"):
         mr = out.get("matched_row") or out.get("lookup") or {}
-        val = mr.get("product") or ""
+        val = (
+            mr.get("product")
+            or out.get("product")  # consultar breakdowns store it here
+            or ""
+        )
+        # Last resort: parse "remera / serigrafia / 1 logo" format
+        if not val and out.get("row_matched"):
+            parts = str(out["row_matched"]).split(" / ")
+            val = parts[0].strip() if parts else ""
         if val:
             out["product_type"] = val
+
     if not out.get("technique"):
         mr = out.get("matched_row") or out.get("lookup") or {}
-        val = mr.get("technique") or ""
+        val = mr.get("technique") or out.get("technique_raw") or ""
         if val:
             out["technique"] = val
+
     if not out.get("product_variant"):
         mr = out.get("matched_row") or out.get("lookup") or {}
         val = mr.get("variant") or ""
