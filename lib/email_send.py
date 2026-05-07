@@ -1,10 +1,21 @@
 """
 Email sending - admin and client notifications for estimates.
-Uses Resend (https://resend.com) if RESEND_API_KEY is set, else no-op.
+Uses AWS SES via boto3 (no API key needed — uses the AppRunner IAM role).
+Falls back gracefully if SES is not configured.
 """
 
 import os
 from typing import Any
+
+
+ADMIN_EMAIL  = os.environ.get("ADMIN_EMAIL", "")
+FROM_EMAIL   = os.environ.get("RESEND_FROM_EMAIL", "")   # reuse same env var
+AWS_REGION   = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
+
+
+def _ses():
+    import boto3
+    return boto3.client("ses", region_name=AWS_REGION)
 
 
 def _format_currency(amount: float, currency: str = "USD") -> str:
@@ -13,118 +24,93 @@ def _format_currency(amount: float, currency: str = "USD") -> str:
 
 def _build_admin_body(estimate_id: str, data: dict) -> str:
     breakdown = data.get("breakdown", {})
-    meta = data.get("meta", {})
-    analysis = data.get("analysis", {})
+    meta      = data.get("meta", {})
+    analysis  = data.get("analysis", {})
     lines = [
         f"Estimate #{estimate_id}",
         "",
         "--- Summary ---",
         f"Total: {_format_currency(data.get('estimate', 0), data.get('currency', 'USD'))}",
         f"Quantity: {breakdown.get('quantity', '-')}",
-        f"Size: {breakdown.get('size') or '-'}",
-        f"Color: {breakdown.get('color') or '-'}",
+        f"Product: {breakdown.get('product_type') or breakdown.get('matched_row', {}).get('product') or '-'}",
+        f"Technique: {breakdown.get('technique') or '-'}",
         f"Product ID: {meta.get('product_id', '-')}",
         f"Variant ID: {meta.get('variant_id', '-')}",
         "",
-        "--- Pricing breakdown ---",
-        f"Logo size: {breakdown.get('logo_size', '-')}",
-        f"Color count: {breakdown.get('color_count', '-')}",
-        f"Unit price: {breakdown.get('unit_price_cents', 0) / 100:.2f}",
+        "--- Client ---",
+        f"Name: {data.get('client_name', '-')}",
+        f"Email: {data.get('client_email', '-')}",
+        f"Company: {data.get('client_company', '-')}",
         "",
     ]
-    if data.get("client_name") or data.get("client_email") or data.get("client_company"):
-        lines.extend([
-            "--- Client ---",
-            f"Name: {data.get('client_name', '-')}",
-            f"Email: {data.get('client_email', '-')}",
-            f"Company: {data.get('client_company', '-')}",
-            "",
-        ])
     if analysis:
         lines.append("--- Design analysis ---")
         for k, v in analysis.items():
             if isinstance(v, dict):
                 lines.append(f"  {k}: {v.get('logo_size', '-')} / {v.get('color_count', '-')} colors")
-            else:
-                lines.append(f"  {k}: {v}")
     return "\n".join(lines)
 
 
 def _build_client_body(estimate_id: str, data: dict) -> str:
     breakdown = data.get("breakdown", {})
     lines = [
-        f"Your estimate #{estimate_id}",
+        f"Tu presupuesto #{estimate_id}",
         "",
         f"Total: {_format_currency(data.get('estimate', 0), data.get('currency', 'USD'))}",
-        f"Quantity: {breakdown.get('quantity', '-')} units",
-        f"Size: {breakdown.get('size') or 'N/A'}",
-        f"Color: {breakdown.get('color') or 'N/A'}",
+        f"Cantidad: {breakdown.get('quantity', '-')} unidades",
         "",
+        "Guardá este número de referencia. Podés contestar a este email para cualquier consulta.",
     ]
-    if data.get("client_company"):
-        lines.append(f"Company: {data.get('client_company')}")
-        lines.append("")
-    lines.append("Guarda este número de referencia. Podés contestar a este email para cualquier consulta.")
     return "\n".join(lines)
 
 
-def send_estimate_emails(estimate_id: str, data: dict) -> tuple[bool, str]:
-    """
-    Send estimate emails to admin and client.
-    Returns (success, message).
-    """
-    api_key = os.environ.get("RESEND_API_KEY")
-    admin_email = os.environ.get("ADMIN_EMAIL")
-    from_email = os.environ.get("RESEND_FROM_EMAIL", "onboarding@resend.dev")
+def _send_ses(*, to: str, subject: str, body: str) -> tuple[bool, str]:
+    if not FROM_EMAIL:
+        return False, "FROM_EMAIL not configured (set RESEND_FROM_EMAIL env var)"
+    try:
+        _ses().send_email(
+            Source=FROM_EMAIL,
+            Destination={"ToAddresses": [to]},
+            Message={
+                "Subject": {"Data": subject, "Charset": "UTF-8"},
+                "Body":    {"Text": {"Data": body, "Charset": "UTF-8"}},
+            },
+        )
+        return True, "sent"
+    except Exception as e:
+        return False, str(e)
 
-    if not api_key or not admin_email:
-        return False, "Email not configured (RESEND_API_KEY, ADMIN_EMAIL)"
+
+def send_estimate_emails(estimate_id: str, data: dict) -> tuple[bool, str]:
+    if not ADMIN_EMAIL:
+        return False, "ADMIN_EMAIL not configured"
 
     client_email = data.get("client_email")
     if not client_email:
         return False, "No client email"
 
-    try:
-        import httpx
+    quantity = (data.get("breakdown") or {}).get("quantity", 0) or 0
 
-        quantity = data.get("breakdown", {}).get("quantity", 0) or 0
-        client_body = _build_client_body(estimate_id, data)
-
-        # Send to admin only when quantity >= 100
-        if quantity >= 100:
-            admin_body = _build_admin_body(estimate_id, data)
-            r_admin = httpx.post(
-                "https://api.resend.com/emails",
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json={
-                    "from": from_email,
-                    "to": [admin_email],
-                    "subject": f"[merch7am] Estimate #{estimate_id} - {data.get('client_name', 'Unknown')}",
-                    "text": admin_body,
-                },
-                timeout=10,
-            )
-            if r_admin.status_code >= 400:
-                return False, f"Admin email failed: {r_admin.text}"
-
-        # Send to client (always)
-        r_client = httpx.post(
-            "https://api.resend.com/emails",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={
-                "from": from_email,
-                "to": [client_email],
-                "subject": f"Your estimate #{estimate_id} - merch7am",
-                "text": client_body,
-            },
-            timeout=10,
+    # Notify admin only for larger orders
+    if quantity >= 100:
+        ok, msg = _send_ses(
+            to=ADMIN_EMAIL,
+            subject=f"[merch7am] Estimate #{estimate_id} — {data.get('client_name', 'Unknown')}",
+            body=_build_admin_body(estimate_id, data),
         )
-        if r_client.status_code >= 400:
-            return False, f"Client email failed: {r_client.text}"
+        if not ok:
+            return False, f"Admin email failed: {msg}"
 
-        return True, "Emails sent"
-    except Exception as e:
-        return False, str(e)
+    # Always notify client
+    ok, msg = _send_ses(
+        to=client_email,
+        subject=f"Tu presupuesto #{estimate_id} — merch7am",
+        body=_build_client_body(estimate_id, data),
+    )
+    if not ok:
+        return False, f"Client email failed: {msg}"
+
+    return True, "Emails sent"
 
 
 def _corp_brief_text_body(data: dict) -> str:
@@ -144,55 +130,27 @@ def _corp_brief_text_body(data: dict) -> str:
         f"Tipo: {data.get('tipo') or '—'}",
         f"Logo / diseño: {data.get('logo') or '—'}",
     ]
-    como = data.get("como")
-    if como:
-        lines.extend(["", f"Cómo nos conocieron: {como}"])
-    cantidad = data.get("cantidad")
-    if cantidad:
-        lines.append(f"Cantidad tentativa: {cantidad}")
-    fecha = data.get("fecha")
-    if fecha:
-        lines.append(f"Fecha esperada entrega / evento: {fecha}")
-
+    if data.get("como"):
+        lines.extend(["", f"Cómo nos conocieron: {data['como']}"])
+    if data.get("cantidad"):
+        lines.append(f"Cantidad tentativa: {data['cantidad']}")
+    if data.get("fecha"):
+        lines.append(f"Fecha esperada entrega / evento: {data['fecha']}")
     ctx = (data.get("contexto") or "").strip()
-    lines.extend(["", "--- Detalle ---", ctx if ctx else "(sin texto adicional)", ""])
+    lines.extend(["", "--- Detalle ---", ctx or "(sin texto adicional)", ""])
     return "\n".join(lines)
 
 
 def send_corp_brief_email(data: dict) -> tuple[bool, str]:
-    """
-    Notify admin via Resend when someone submits the corporate brief modal.
-
-    Uses RESEND_API_KEY, ADMIN_EMAIL / BRIEF_TO_EMAIL (optional override),
-    RESEND_FROM_EMAIL.
-    Returns (success, message).
-    """
-    api_key = os.environ.get("RESEND_API_KEY")
-    admin_email = os.environ.get("BRIEF_TO_EMAIL") or os.environ.get("ADMIN_EMAIL")
-    from_email = os.environ.get("RESEND_FROM_EMAIL", "onboarding@resend.dev")
-
-    if not api_key or not admin_email:
-        return False, "Email not configured (RESEND_API_KEY and ADMIN_EMAIL or BRIEF_TO_EMAIL)"
+    to_email = os.environ.get("BRIEF_TO_EMAIL") or ADMIN_EMAIL
+    if not to_email:
+        return False, "ADMIN_EMAIL not configured"
 
     empresa = data.get("empresa") or "—"
-    nombre = data.get("nombre") or ""
+    nombre  = data.get("nombre") or ""
 
-    try:
-        import httpx
-
-        r = httpx.post(
-            "https://api.resend.com/emails",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={
-                "from": from_email,
-                "to": [admin_email],
-                "subject": f"[merch7am] Brief — {nombre} — {empresa}",
-                "text": _corp_brief_text_body(data),
-            },
-            timeout=12,
-        )
-        if r.status_code >= 400:
-            return False, f"Resend failed: {r.text}"
-        return True, "Brief email sent"
-    except Exception as e:
-        return False, str(e)
+    return _send_ses(
+        to=to_email,
+        subject=f"[merch7am] Brief — {nombre} — {empresa}",
+        body=_corp_brief_text_body(data),
+    )
