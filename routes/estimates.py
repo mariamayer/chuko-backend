@@ -116,49 +116,63 @@ def list_estimates(
     _check_token(token)
 
     estimates = []
+    seen_ids: set[str] = set()
 
+    def _matches_filters(data: dict) -> bool:
+        if company:
+            cc = (data.get("client_company") or "").strip().lower()
+            if company.lower() not in cc:
+                return False
+        if client_id:
+            if (data.get("client_id") or "default") != client_id:
+                return False
+        return True
+
+    # ── Try S3 first ─────────────────────────────────────────────────────────
     if s3_storage.is_enabled():
-        # List all JSON keys from S3 (already sorted newest-first by key name)
-        prefix = s3_storage.estimate_list_prefix()
-        keys = s3_storage.list_keys(prefix)
-        json_keys = [k for k in keys if k.endswith(".json")]
-        for key in json_keys:
-            try:
-                data = s3_storage.get_json(key)
-                if not data:
+        try:
+            prefix = s3_storage.estimate_list_prefix()
+            keys = s3_storage.list_keys(prefix)
+            json_keys = [k for k in keys if k.endswith(".json")]
+            for key in json_keys:
+                try:
+                    data = s3_storage.get_json(key)
+                    if not data:
+                        continue
+                    _add_created_at(data)
+                except Exception:
                     continue
-                _add_created_at(data)
-            except Exception:
-                continue
-            if company:
-                cc = (data.get("client_company") or "").strip().lower()
-                if company.lower() not in cc:
+                if not _matches_filters(data):
                     continue
-            if client_id:
-                if (data.get("client_id") or "default") != client_id:
-                    continue
-            estimates.append(_estimate_summary(data))
-            if len(estimates) >= limit:
-                break
-    else:
-        if not ESTIMATES_DIR.exists():
-            return {"ok": True, "count": 0, "estimates": []}
+                eid = data.get("estimate_id") or ""
+                if eid and eid not in seen_ids:
+                    seen_ids.add(eid)
+                    estimates.append(_estimate_summary(data))
+                if len(estimates) >= limit:
+                    break
+        except Exception as e:
+            print(f"[estimates] S3 list failed, falling back to local: {e}")
+
+    # ── Also check local filesystem (catches S3-fallback saves) ──────────────
+    if ESTIMATES_DIR.exists():
         paths = sorted(ESTIMATES_DIR.glob("EST-*.json"), reverse=True)
         for path in paths:
+            if len(estimates) >= limit:
+                break
             try:
                 data = _load_estimate_local(path)
             except Exception:
                 continue
-            if company:
-                cc = (data.get("client_company") or "").strip().lower()
-                if company.lower() not in cc:
-                    continue
-            if client_id:
-                if (data.get("client_id") or "default") != client_id:
-                    continue
+            eid = data.get("estimate_id") or ""
+            if eid in seen_ids:
+                continue  # already loaded from S3
+            if not _matches_filters(data):
+                continue
+            seen_ids.add(eid)
             estimates.append(_estimate_summary(data))
-            if len(estimates) >= limit:
-                break
+
+    # Sort combined results newest-first by estimate_id
+    estimates.sort(key=lambda e: e.get("estimate_id") or "", reverse=True)
 
     return {"ok": True, "count": len(estimates), "estimates": estimates}
 
