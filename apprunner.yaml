@@ -36,3 +36,7 @@ run:
   secrets:
     - name: RESEND_API_KEY
       value-from: "arn:aws:secretsmanager:us-east-1:383021010759:secret:merch7am/resend-api-key-hpG0ov"
+    - name: OPENAI_API_KEY
+      value-from: "arn:aws:secretsmanager:us-east-1:383021010759:secret:merch7am/openai-api-key-2Oucjz"
+    - name: SHOPIFY_STOREFRONT_TOKEN
+      value-from: "arn:aws:secretsmanager:us-east-1:383021010759:secret:merch7am/shopify-storefront-token-SrJ4Yt"
